@@ -1,122 +1,170 @@
-# PreMedia API
+# premedia-api
 
-A minimal REST API backend for Saisha Technologies' PreMedia portal. It uses Python 3.13+, FastAPI, and the Google Cloud Firestore server SDK.
+Backend API for **Premedia Hub**, a premedia / digital asset management (DAM) tool for artwork upload, approval workflow, and role-based access.
 
-## Project structure
+## System Overview (3-Tier Architecture)
 
-```text
-premedia-api/
-├── app/
-│   ├── __init__.py
-│   ├── main.py
-│   ├── config.py
-│   ├── db.py
-│   └── routes.py
-├── .env.example
-├── .gitignore
-├── requirements.txt
-└── README.md
-```
+- **Tier 1 (Presentation):** React frontend hosted on GitHub Pages (`saishatech18/premedia`), served at `saishatech.in/premedia` via a Vercel rewrite.
+- **Tier 2 (Logic):** this repo, a FastAPI Python backend. It is the **only** gateway to the database (the frontend does not use `supabase-js`).
+- **Tier 3 (Data):** PostgreSQL hosted on Supabase, holding RBAC and DAM metadata.
+- **Storage Layer (DAM assets, planned):** external object storage (S3 / GCS / R2) for large artwork files via pre-signed upload URLs. The database stores metadata and file URLs only.
 
-## Prerequisites
+---
 
-- Python 3.13 or newer
-- An existing Google Cloud project with Firestore enabled in Native mode
-- A downloaded service-account JSON key with Firestore access
+## Getting Started
 
-## Google Cloud configuration
+### Prerequisites
 
-Place the service-account JSON file in the project root, or use an absolute path. Keep it private; `.gitignore` excludes service-account filenames.
+- Python 3.12+
+- A PostgreSQL database: either a Supabase project or a local Docker container
 
-Create `.env` from `.env.example` and set:
-
-```dotenv
-GOOGLE_APPLICATION_CREDENTIALS=./premedia-service-account.json
-GOOGLE_CLOUD_PROJECT=premedia-ap
-FIRESTORE_COLLECTION=artwork_tasks
-```
-
-`GOOGLE_APPLICATION_CREDENTIALS` points to the JSON key, `GOOGLE_CLOUD_PROJECT` is the Google Cloud project ID, and `FIRESTORE_COLLECTION` defaults to `artwork_tasks`. For Google Cloud deployment, omit the key path and use the runtime's Application Default Credentials instead.
-
-## Set up the local project
-
-From the project root:
-
-### Windows PowerShell
-
-```powershell
-py -3.13 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-Copy-Item .env.example .env
-```
-
-### macOS / Linux
+### 1. Install dependencies
 
 ```bash
-python3.13 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
 pip install -r requirements.txt
+```
+
+### 2. Configure the database
+
+```bash
 cp .env.example .env
 ```
 
-## Run the API
+Then set `DATABASE_URL` in `.env` using **one** of the options below.
 
-With the virtual environment activated:
+**Option A: Supabase**
+
+1. In the Supabase dashboard, click **Connect** and copy the **Session pooler** connection string.
+2. Replace the password placeholder with your **database password** (Project Settings → Database), not your Supabase account login. Don't keep the `[ ]` brackets.
+3. URL-encode any special characters in the password (`@` → `%40`, `!` → `%21`, `#` → `%23`).
+
+```
+DATABASE_URL=postgresql://postgres.<project-ref>:<db-password>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require
+```
+
+> Use the **Session pooler** (port 5432). The *Direct connection* host is IPv6-only and fails on most networks. The *Transaction pooler* (port 6543) doesn't support the prepared statements psycopg 3 uses.
+
+**Option B: local Postgres in Docker**
 
 ```bash
-python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+docker run -d --name premedia-db -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=premedia -p 5432:5432 postgres:16
 ```
 
-Open the interactive API documentation at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
+```
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/premedia
+```
 
-The configured browser origins are `http://localhost:3001` and `https://premedia.saishatech.in`. CORS does not affect direct curl requests.
-
-## Test the endpoints
-
-### Health check
+### 3. Run the API
 
 ```bash
-curl http://127.0.0.1:8000/health
+uvicorn app.main:app --reload
 ```
 
-Expected response:
+- API: http://localhost:8000
+- Interactive docs (Swagger UI): http://localhost:8000/docs
 
-```json
-{"status":"ok","service":"premedia-api"}
-```
+On startup the app creates any missing tables and seeds the default roles. `DATABASE_URL` is read once at startup, so **restart** the server after editing `.env`; `--reload` only watches code changes.
 
-### Create an artwork task
+### 4. Try it
 
 ```bash
-curl.exe -X POST http://127.0.0.1:8000/api/v1/tasks -H "Content-Type: application/json" -d '{"title":"Summer catalogue artwork","client_name":"Example Client","task_type":"Master AW"}'
+# Create a user (role names are case-insensitive)
+curl -X POST http://localhost:8000/users/ \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"designer@example.com","password":"changeme","role":"designer"}'
+
+# Log in
+curl -X POST http://localhost:8000/login/ \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"designer@example.com","password":"changeme"}'
 ```
 
-`status` is optional and defaults to `draft`. Other example task types include `Reprographics` and `KLD Amendment`.
+### Troubleshooting
 
-A successful response has HTTP `201` and includes the generated Firestore document ID:
+| Error | Cause |
+|---|---|
+| `failed to resolve host '...@aws-0-...'` | Unencoded `@` (or other special character) in the password. URL-encode it. |
+| `password authentication failed for user "postgres"` | Wrong password. Use the database password; reset it in Project Settings → Database if unsure. |
+| `Tenant or user not found` | Wrong project ref, region, or username in the URL. Copy it again from **Connect**. |
+| `No module named 'psycopg'` | Dependencies are out of date. Run `pip install -r requirements.txt`. |
 
-```json
-{
-  "title": "Summer catalogue artwork",
-  "client_name": "Example Client",
-  "task_type": "Master AW",
-  "status": "draft",
-  "id": "generated-firestore-document-id",
-  "created_at": "2026-09-11T12:00:00Z"
-}
+---
+
+## API Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/` | Health check |
+| `GET` | `/users/` | List all users with their role |
+| `POST` | `/users/` | Create a user: `{email, password, role}`. `role` is a role name. |
+| `POST` | `/login/` | Check credentials: `{email, password}`. Returns user info (no token yet). |
+
+> ⚠️ **Not production-ready yet:** passwords are stored in plain text, there is no authentication or role enforcement on any endpoint, and CORS allows all origins. See the milestones below.
+
+---
+
+## Project Structure
+
+```
+premedia-api/
+├── app/
+│   ├── __init__.py
+│   ├── config.py       # pydantic-settings Settings (app_name)
+│   ├── db.py           # Reads DATABASE_URL; SQLAlchemy engine, session maker, get_db dependency
+│   ├── models.py       # DB schema: Role, User, Artwork, ArtworkStatus
+│   ├── schemas.py      # Pydantic request/response schemas
+│   └── main.py         # App, CORS, table creation, role seeding, API endpoints
+├── .env.example        # Template for .env
+├── .env                # Local secrets (gitignored)
+└── requirements.txt    # fastapi, uvicorn, sqlalchemy, psycopg[binary], pydantic-settings
 ```
 
-### List tasks
+---
 
-```bash
-curl http://127.0.0.1:8000/api/v1/tasks
-```
+## Database Schema (`models.py`)
 
-The API iterates over the Firestore collection stream and returns all task documents as a JSON array.
+1. **`roles`** (RBAC)
+   - `id` (PK, Integer)
+   - `name` (String, unique, lowercase): `admin`, `designer`, `client`, `production`, `quality`
+   - `description` (String)
 
-## Deployment note
+2. **`users`**
+   - `id` (PK, Integer)
+   - `email` (String, unique)
+   - `hashed_password` (String; currently plain text, hashing pending)
+   - `full_name` (String)
+   - `role_id` (FK → `roles.id`)
 
-For Google Cloud deployment, prefer Application Default Credentials from the attached runtime service account or another managed identity. Do not upload `service-account.json` to the server. Set `GOOGLE_CLOUD_PROJECT` or configure the platform's project context as appropriate for the selected Google Cloud service.
+3. **`artworks`** (DAM metadata)
+   - `id` (PK, Integer)
+   - `title` (String)
+   - `file_url` (String: path in object storage; files are never stored in the DB)
+   - `file_size_mb` (Integer)
+   - `status` (Enum, stored as `PENDING` / `APPROVED` / `REJECTED`)
+   - `created_at` (DateTime)
+   - `owner_id` (FK → `users.id`)
+
+Tables are created automatically on startup (`create_all`). It only creates **missing** tables and never alters existing ones. There are no migrations yet.
+
+**Supabase security:** Row Level Security (RLS) is enabled, with no policies, on all tables. This blocks Supabase's public REST API. The backend connects as `postgres`, which bypasses RLS. **Enable RLS on any new table you add.**
+
+---
+
+## Current Status & Next Milestones
+
+- [x] Frontend deployed & live on GitHub Pages
+- [x] Backend structure & PostgreSQL (psycopg 3) driver configured
+- [x] SQLAlchemy models for RBAC and artwork metadata
+- [x] Tables auto-created on startup
+- [x] Default roles seeded (`admin`, `designer`, `client`, `production`, `quality`)
+- [x] Firestore code removed; PostgreSQL is the only datastore
+- [x] User registration & login endpoints
+- [x] RLS enabled on all Supabase tables
+- [ ] Password hashing
+- [ ] JWT authentication & role-based access checks
+- [ ] Restrict CORS to the frontend origins
+- [ ] Database migrations (Alembic)
+- [ ] Artwork endpoints & approval workflow
+- [ ] Object storage (S3/R2) pre-signed uploads
